@@ -43,6 +43,19 @@ final class PayloadValidator
     public const MAX_JSON_DEPTH = 6;
     private const MAX_CONSENT_KEYS = 20;
 
+    /**
+     * Address keys a store may use for the country, in priority order: the
+     * canonical key first, then the name every shipped connector actually sent,
+     * then the ISO aliases a few mappers expose.
+     */
+    private const COUNTRY_KEYS = [
+        'country_code',
+        'country',
+        'country_iso',
+        'country_iso_code',
+        'country_code_iso2',
+    ];
+
     public static function typeFromRoute(string $suffix): ?string
     {
         $normalized = strtolower(trim($suffix));
@@ -892,17 +905,30 @@ final class PayloadValidator
         // Bitrix all sent this one) and the ISO aliases some mappers use. The
         // earlier contract only copied `country_code`, so the delivery country
         // silently disappeared from every order sent as `country`.
-        // Only a real ISO 3166-1 alpha-2 code is accepted; country *names*
-        // (`shipping_country` of OpenCart 3.0/4.0) are not codes and are kept
-        // out of `country_code` instead of being truncated into garbage.
-        if ($this->addressValue($address, 'country_code') === '') {
-            foreach (['country', 'country_iso', 'country_iso_code', 'country_code_iso2'] as $alias) {
-                $candidate = strtoupper($this->addressValue($address, $alias));
-                if (preg_match('/^[A-Z]{2}$/', $candidate) === 1) {
-                    $address['country_code'] = $candidate;
-                    break;
-                }
+        //
+        // Values are resolved through CountryResolver: a two-letter code passes
+        // through, and a *name* (`Россия`, `Germany`, `Türkiye`) is mapped to its
+        // ISO 3166-1 alpha-2 code. Half the installed connectors only ever send
+        // the platform-localised name (Webasyst `shipping_country`, Moguta
+        // `country`, Tilda `country`, InSales `delivery.country`), so resolving
+        // names here repairs them without a connector update. An unresolvable
+        // value is dropped instead of being truncated into garbage.
+        $resolvedCountry = '';
+        foreach (self::COUNTRY_KEYS as $alias) {
+            $candidate = $this->addressValue($address, $alias);
+            if ($candidate === '') {
+                continue;
             }
+            $iso = CountryResolver::toIsoCode($candidate);
+            if ($iso !== '') {
+                $resolvedCountry = $iso;
+                break;
+            }
+        }
+        if ($resolvedCountry !== '') {
+            $address['country_code'] = $resolvedCountry;
+        } else {
+            unset($address['country_code']);
         }
 
         $limits = [
