@@ -19,6 +19,9 @@ final class StatusMappingService
 
     /**
      * Maps a CRM status code to the external CMS status configured for the store.
+     *
+     * Returns an empty string when the store has no mapping for this CRM stage —
+     * the caller must not send anything in that case.
      */
     public function mapCrmToExternal(int $storeId, string $crmStatus, string $scope = 'order'): string
     {
@@ -44,8 +47,12 @@ final class StatusMappingService
             return trim($external);
         }
 
-        // Default fallbacks if no explicit mapping configured
-        return $normalized;
+        // No mapping configured for this CRM stage. Returning the CRM code here
+        // (the previous behaviour) pushed e.g. `in_progress` to a WooCommerce
+        // store, which is not a valid `wc-*` status: WooCommerce silently reset
+        // the order to `pending` while the CRM recorded a successful 200.
+        // An empty string means "nothing to send" and the caller skips the event.
+        return '';
     }
 
     /**

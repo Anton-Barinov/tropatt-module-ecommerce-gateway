@@ -285,8 +285,80 @@ final class PayloadValidator
         $out['attributes'] = is_array($payload['attributes'] ?? null)
             ? self::normalizeFreeForm($payload['attributes'])
             : [];
+        // The free-form `custom_fields` bag is part of the connector contract
+        // (comment, IP, promo codes, platform field values, analytics cookies —
+        // 12 of the shipped connectors fill it). The order validator used to
+        // drop it silently, so the data never reached the CRM record.
+        $out['custom_fields'] = self::normalizeCustomFields($payload['custom_fields'] ?? null);
 
         return $out;
+    }
+
+    /**
+     * Custom fields keep their original (often Cyrillic) keys and one level of
+     * nested objects (`billing_entity.inn`), unlike `attributes`, whose keys are
+     * restricted to an ASCII slug. Values are sanitized exactly like free-form
+     * ones; the size caps are shared so a hostile payload cannot blow up the
+     * intake record.
+     *
+     * @return array<string,mixed>
+     */
+    public static function normalizeCustomFields(mixed $value): array
+    {
+        if (!is_array($value)) {
+            return [];
+        }
+
+        $out = [];
+        $count = 0;
+        foreach ($value as $key => $item) {
+            if ($count >= self::MAX_FORM_DATA_KEYS) {
+                break;
+            }
+            $key = mb_substr(trim(self::cleanString((string)$key)), 0, 64);
+            if ($key === '' || str_starts_with($key, '_')) {
+                continue;
+            }
+            $count++;
+            $out[$key] = self::normalizeCustomFieldValue($item, 0);
+        }
+
+        return $out;
+    }
+
+    private static function normalizeCustomFieldValue(mixed $value, int $depth): mixed
+    {
+        if (is_array($value)) {
+            if ($depth >= 1) {
+                // Two levels are enough for the shipped connectors (`key` and
+                // `key.subkey`); deeper structures are dropped, not flattened.
+                return null;
+            }
+            $out = [];
+            foreach ($value as $key => $item) {
+                $key = mb_substr(trim(self::cleanString((string)$key)), 0, 64);
+                if ($key === '') {
+                    continue;
+                }
+                $out[$key] = self::normalizeCustomFieldValue($item, $depth + 1);
+            }
+
+            return $out;
+        }
+
+        return self::normalizeFreeFormValue($value, $depth);
+    }
+
+    /**
+     * @param array<string,mixed> $address
+     */
+    private function addressValue(array $address, string $key): string
+    {
+        if (!array_key_exists($key, $address) || !is_scalar($address[$key])) {
+            return '';
+        }
+
+        return trim(self::cleanString($address[$key]));
     }
 
     /**
@@ -813,6 +885,26 @@ final class PayloadValidator
     private function normalizeAddress(array $address): array
     {
         $out = [];
+
+        // Country is accepted under every name the store platforms expose: the
+        // canonical `country_code`, plus `country` (WooCommerce, Shopify,
+        // Magento, InSales, PrestaShop, CS-Cart, Webasyst, Moguta, Tilda and
+        // Bitrix all sent this one) and the ISO aliases some mappers use. The
+        // earlier contract only copied `country_code`, so the delivery country
+        // silently disappeared from every order sent as `country`.
+        // Only a real ISO 3166-1 alpha-2 code is accepted; country *names*
+        // (`shipping_country` of OpenCart 3.0/4.0) are not codes and are kept
+        // out of `country_code` instead of being truncated into garbage.
+        if ($this->addressValue($address, 'country_code') === '') {
+            foreach (['country', 'country_iso', 'country_iso_code', 'country_code_iso2'] as $alias) {
+                $candidate = strtoupper($this->addressValue($address, $alias));
+                if (preg_match('/^[A-Z]{2}$/', $candidate) === 1) {
+                    $address['country_code'] = $candidate;
+                    break;
+                }
+            }
+        }
+
         $limits = [
             'country_code' => 2,
             'region' => 128,

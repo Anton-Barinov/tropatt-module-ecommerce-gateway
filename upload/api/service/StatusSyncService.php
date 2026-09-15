@@ -93,6 +93,27 @@ final class StatusSyncService
 
         // 4. Map CRM status to external CMS status
         $externalStatus = $this->statusMappingService->mapCrmToExternal($storeId, $newStatus, 'order');
+        if ($externalStatus === '') {
+            // The store has no mapping for this CRM stage. Sending the CRM code
+            // as the external status made WooCommerce silently reset the order
+            // to `pending` while the CRM recorded a 200; skip the event instead
+            // and leave a trace in the store log.
+            $this->storeRepo->logSecurityEvent(
+                'order.status_not_mapped',
+                'warning',
+                $storeId,
+                null,
+                null,
+                [
+                    'task_id' => $taskId,
+                    'task_public_id' => $taskPublicId,
+                    'external_order_id' => $externalOrderId,
+                    'new_status' => $newStatus,
+                    'reason' => 'No external status mapping for the CRM stage',
+                ]
+            );
+            return null;
+        }
 
         // 5. Build canonical webhook payload
         $timestamp = time();

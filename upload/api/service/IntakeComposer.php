@@ -231,6 +231,10 @@ final class IntakeComposer
         }
 
         $lines = array_merge($lines, self::freeFormTable('Дополнительные свойства заказа', $payload['attributes'] ?? []));
+        // `custom_fields` carry the platform-specific extras (comment, IP, promo
+        // codes, field values, analytics cookies). They are rendered into the
+        // same block so nothing the connector sent is lost on the way to the CRM.
+        $lines = array_merge($lines, self::freeFormTable('Дополнительные поля магазина', $payload['custom_fields'] ?? []));
 
         return $lines;
     }
@@ -517,11 +521,20 @@ final class IntakeComposer
     /**
      * @param mixed $value
      */
-    private static function valueToString(mixed $value): string
+    private static function valueToString(mixed $value, int $depth = 0): string
     {
         if (is_array($value)) {
             $parts = [];
-            foreach ($value as $item) {
+            foreach ($value as $key => $item) {
+                if (is_array($item)) {
+                    // Nested objects (`billing_entity.inn`) used to render as an
+                    // empty cell; keep them readable as `subkey: value`.
+                    $nested = $depth >= 1 ? '' : self::valueToString($item, $depth + 1);
+                    if ($nested !== '') {
+                        $parts[] = (string)$key . ': ' . $nested;
+                    }
+                    continue;
+                }
                 if (is_scalar($item)) {
                     $parts[] = (string)$item;
                 }
